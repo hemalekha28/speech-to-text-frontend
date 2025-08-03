@@ -26,7 +26,7 @@ function App() {
   // Check server health and configuration
   const checkServerHealth = async () => {
     try {
-      const response = await fetch("http://localhost:5000/health")
+      const response = await fetch("https://speech-to-text-backend-06uq.onrender.com/health")
       const data = await response.json()
       console.log("Server health check:", data)
 
@@ -41,7 +41,7 @@ function App() {
 
   const fetchSavedTranscripts = async () => {
     try {
-      const response = await fetch("http://localhost:5000/transcriptions")
+      const response = await fetch("https://speech-to-text-backend-06uq.onrender.com/transcriptions")
       const data = await response.json()
       if (data.success) {
         setHistory(data.data)
@@ -279,7 +279,7 @@ function App() {
     duration = null,
   ) => {
     try {
-      const response = await fetch("http://localhost:5000/transcriptions", {
+      const response = await fetch("https://speech-to-text-backend-06uq.onrender.com/transcriptions", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -342,7 +342,7 @@ function App() {
 
       console.log("📡 Sending to server...")
 
-      const response = await fetch("http://localhost:5000/transcribe-audio", {
+      const response = await fetch("https://speech-to-text-backend-06uq.onrender.com/transcribe-audio", {
         method: "POST",
         body: formData,
       })
