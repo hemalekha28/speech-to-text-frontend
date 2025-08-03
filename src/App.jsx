@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, useCallback } from "react"
 import { Mic, MicOff, Volume2, Copy, Download, Trash2, Clock, Globe } from "lucide-react"
 
 function App() {
@@ -18,13 +18,8 @@ function App() {
   const [recordingTimer, setRecordingTimer] = useState(null)
   const [error, setError] = useState("")
 
-  useEffect(() => {
-    fetchSavedTranscripts()
-    checkServerHealth()
-  }, [])
-
   // Check server health and configuration
-  const checkServerHealth = async () => {
+  const checkServerHealth = useCallback(async () => {
     try {
       const response = await fetch("https://speech-to-text-backend-06uq.onrender.com/health")
       const data = await response.json()
@@ -37,9 +32,9 @@ function App() {
       console.error("Server health check failed:", err)
       setError("Cannot connect to server. Make sure the server is running on port 5000.")
     }
-  }
+  }, [])
 
-  const fetchSavedTranscripts = async () => {
+  const fetchSavedTranscripts = useCallback(async () => {
     try {
       const response = await fetch("https://speech-to-text-backend-06uq.onrender.com/transcriptions")
       const data = await response.json()
@@ -50,11 +45,179 @@ function App() {
     } catch (err) {
       console.error("Error fetching saved transcripts:", err)
     }
-  }
+  }, [])
+
+  const saveTranscriptToBackend = useCallback(async (
+    text,
+    confidence = null,
+    method = "webkit",
+    language = null,
+    duration = null,
+  ) => {
+    try {
+      const response = await fetch("https://speech-to-text-backend-06uq.onrender.com/transcriptions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ text, confidence, method, language, duration }),
+      })
+      const data = await response.json()
+      if (!data.success) {
+        console.error("Failed to save:", data.message)
+      }
+    } catch (err) {
+      console.error("Error saving transcript:", err)
+    }
+  }, [])
+
+  // Process Whisper speech with proper error handling
+  const processWhisperSpeech = useCallback(async () => {
+    console.log("🔄 Processing Whisper speech...")
+    console.log("Audio chunks available:", audioChunks.length)
+
+    if (audioChunks.length === 0) {
+      console.log("❌ No audio chunks to process")
+      setError("No audio data recorded. Try speaking for a longer duration.")
+      return
+    }
+
+    setIsProcessing(true)
+
+    try {
+      const mimeType = mediaRecorder?.mimeType || "audio/webm;codecs=opus"
+      const audioBlob = new Blob(audioChunks, { type: mimeType })
+      
+      console.log("📦 Created audio blob:")
+      console.log("  - Size:", audioBlob.size, "bytes")
+      console.log("  - Type:", audioBlob.type)
+
+      if (audioBlob.size === 0) {
+        console.log("❌ Audio blob is empty")
+        setError("No audio data captured. Please try again.")
+        return
+      }
+
+      if (audioBlob.size < 1000) {
+        console.log("❌ Audio blob too small:", audioBlob.size, "bytes")
+        setError("Recording too short. Please speak for at least 1-2 seconds.")
+        return
+      }
+
+      if (audioBlob.size > 25 * 1024 * 1024) {
+        console.log("❌ File too large:", audioBlob.size, "bytes")
+        setError("Recording too large. Maximum size is 25MB. Try shorter recordings.")
+        return
+      }
+
+      const formData = new FormData()
+      const extension = mimeType.includes('webm') ? 'webm' : 'wav'
+      formData.append("audio", audioBlob, `recording.${extension}`)
+
+      console.log("📡 Sending to server...")
+
+      const response = await fetch("https://speech-to-text-backend-06uq.onrender.com/transcribe-audio", {
+        method: "POST",
+        body: formData,
+      })
+
+      console.log("📡 Server response:")
+      console.log("  - Status:", response.status)
+      console.log("  - OK:", response.ok)
+
+      if (!response.ok) {
+        const errorText = await response.text()
+        throw new Error(`Server error: ${response.status} ${response.statusText} - ${errorText}`)
+      }
+
+      const data = await response.json()
+      console.log("📄 Response data:", data)
+
+      if (data.success) {
+        console.log("✅ Transcription successful:", data.transcript)
+        setTranscript((prev) => prev + data.transcript + " ")
+        await fetchSavedTranscripts()
+        setError("")
+      } else {
+        console.error("❌ Transcription failed:", data.message)
+        setError(`Transcription failed: ${data.message}`)
+      }
+    } catch (error) {
+      console.error("💥 Error sending audio:", error)
+      setError(`Error processing audio: ${error.message}`)
+    } finally {
+      setIsProcessing(false)
+      setAudioChunks([])
+    }
+  }, [audioChunks, mediaRecorder, fetchSavedTranscripts])
+
+  // Setup media recorder for Whisper
+  const setupMediaRecorder = useCallback(async () => {
+    try {
+      console.log("Setting up media recorder for Whisper...")
+      
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          sampleRate: 44100,
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true,
+        },
+      })
+      
+      console.log("✅ Microphone access granted")
+
+      let mimeType = "audio/webm;codecs=opus"
+      if (!MediaRecorder.isTypeSupported(mimeType)) {
+        mimeType = "audio/webm"
+        if (!MediaRecorder.isTypeSupported(mimeType)) {
+          mimeType = "audio/mp4"
+          if (!MediaRecorder.isTypeSupported(mimeType)) {
+            mimeType = ""
+          }
+        }
+      }
+
+      console.log("Using MIME type:", mimeType || "browser default")
+
+      const recorderOptions = mimeType ? { mimeType } : {}
+      const recorder = new MediaRecorder(stream, recorderOptions)
+
+      recorder.ondataavailable = (event) => {
+        console.log("Data available:", event.data.size, "bytes")
+        if (event.data.size > 0) {
+          setAudioChunks((prev) => [...prev, event.data])
+        }
+      }
+
+      recorder.onstop = () => {
+        console.log("Recorder stopped, processing audio...")
+        setTimeout(() => {
+          processWhisperSpeech()
+        }, 100)
+      }
+
+      recorder.onerror = (event) => {
+        console.error("MediaRecorder error:", event.error)
+        setError(`Recording error: ${event.error}`)
+      }
+
+      setMediaRecorder(recorder)
+      
+    } catch (err) {
+      console.error("Error accessing microphone:", err)
+      setError(`Microphone access denied: ${err.message}`)
+    }
+  }, [processWhisperSpeech])
+
+  useEffect(() => {
+    fetchSavedTranscripts()
+    checkServerHealth()
+  }, [fetchSavedTranscripts, checkServerHealth])
 
   // WebKit Speech Recognition setup
   useEffect(() => {
-    if ("webkitSpeechRecognition" in window || "SpeechRecognition" in window) {
+    if (typeof window !== 'undefined' && ("webkitSpeechRecognition" in window || "SpeechRecognition" in window)) {
       const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
       const recognitionInstance = new SpeechRecognition()
 
@@ -92,77 +255,16 @@ function App() {
     } else {
       setIsSupported(false)
     }
-  }, [])
+  }, [saveTranscriptToBackend])
 
-  // Fixed setupMediaRecorder function - moved outside useEffect
-  const setupMediaRecorder = async () => {
-    try {
-      console.log("Setting up media recorder for Whisper...")
-      
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          sampleRate: 44100, // Changed from 16000 to 44100 for better compatibility
-          channelCount: 1,
-          echoCancellation: true,
-          noiseSuppression: true,
-        },
-      })
-      
-      console.log("✅ Microphone access granted")
-
-      // Try different MIME types based on browser support
-      let mimeType = "audio/webm;codecs=opus"
-      if (!MediaRecorder.isTypeSupported(mimeType)) {
-        mimeType = "audio/webm"
-        if (!MediaRecorder.isTypeSupported(mimeType)) {
-          mimeType = "audio/mp4"
-          if (!MediaRecorder.isTypeSupported(mimeType)) {
-            mimeType = "" // Let browser choose
-          }
-        }
-      }
-
-      console.log("Using MIME type:", mimeType || "browser default")
-
-      const recorderOptions = mimeType ? { mimeType } : {}
-      const recorder = new MediaRecorder(stream, recorderOptions)
-
-      recorder.ondataavailable = (event) => {
-        console.log("Data available:", event.data.size, "bytes")
-        if (event.data.size > 0) {
-          setAudioChunks((prev) => [...prev, event.data])
-        }
-      }
-
-      recorder.onstop = () => {
-        console.log("Recorder stopped, processing audio...")
-        // Add delay to ensure all chunks are collected
-        setTimeout(() => {
-          processWhisperSpeech()
-        }, 100)
-      }
-
-      recorder.onerror = (event) => {
-        console.error("MediaRecorder error:", event.error)
-        setError(`Recording error: ${event.error}`)
-      }
-
-      setMediaRecorder(recorder)
-      
-    } catch (err) {
-      console.error("Error accessing microphone:", err)
-      setError(`Microphone access denied: ${err.message}`)
-    }
-  }
-
-  // Fixed useEffect for media recorder setup
+  // Setup media recorder when Whisper is enabled
   useEffect(() => {
     if (useWhisper && !mediaRecorder) {
       setupMediaRecorder()
     }
-  }, [useWhisper])
+  }, [useWhisper, mediaRecorder, setupMediaRecorder])
 
-  // Fixed timer useEffect - replace completely
+  // Recording timer
   useEffect(() => {
     let timer = null
     
@@ -177,7 +279,6 @@ function App() {
       }, 1000)
       setRecordingTimer(timer)
     } else {
-      // Stop and clear timer
       if (recordingTimer) {
         console.log("Stopping recording timer...")
         clearInterval(recordingTimer)
@@ -188,17 +289,15 @@ function App() {
       }
     }
 
-    // Cleanup function
     return () => {
       if (timer) {
         clearInterval(timer)
       }
     }
-  }, [isListening, useWhisper])
+  }, [isListening, useWhisper, recordingTimer])
 
-  // Fixed startListening function - replace completely
   const startListening = () => {
-    setError("") // Clear any previous errors
+    setError("")
     console.log("🎤 Start listening called. UseWhisper:", useWhisper)
 
     if (useWhisper) {
@@ -210,13 +309,12 @@ function App() {
       console.log("🎤 Starting Whisper recording...")
       console.log("MediaRecorder state:", mediaRecorder.state)
       
-      // Clear previous data
       setAudioChunks([])
       setRecordingDuration(0)
 
       try {
         if (mediaRecorder.state === "inactive") {
-          mediaRecorder.start(100) // Collect data every 100ms for better reliability
+          mediaRecorder.start(100)
           setIsListening(true)
           console.log("✅ Whisper recording started")
         } else {
@@ -242,7 +340,6 @@ function App() {
     }
   }
 
-  // Fixed stopListening function - replace completely
   const stopListening = () => {
     console.log("⏹️ Stop listening called")
     
@@ -271,112 +368,6 @@ function App() {
     setError("")
   }
 
-  const saveTranscriptToBackend = async (
-    text,
-    confidence = null,
-    method = "webkit",
-    language = null,
-    duration = null,
-  ) => {
-    try {
-      const response = await fetch("https://speech-to-text-backend-06uq.onrender.com/transcriptions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ text, confidence, method, language, duration }),
-      })
-      const data = await response.json()
-      if (!data.success) {
-        console.error("Failed to save:", data.message)
-      }
-    } catch (err) {
-      console.error("Error saving transcript:", err)
-    }
-  }
-
-  // Fixed processWhisperSpeech function - update completely
-  const processWhisperSpeech = async () => {
-    console.log("🔄 Processing Whisper speech...")
-    console.log("Audio chunks available:", audioChunks.length)
-
-    if (audioChunks.length === 0) {
-      console.log("❌ No audio chunks to process")
-      setError("No audio data recorded. Try speaking for a longer duration.")
-      return
-    }
-
-    setIsProcessing(true)
-
-    try {
-      // Create blob with the recorded MIME type
-      const mimeType = mediaRecorder?.mimeType || "audio/webm;codecs=opus"
-      const audioBlob = new Blob(audioChunks, { type: mimeType })
-      
-      console.log("📦 Created audio blob:")
-      console.log("  - Size:", audioBlob.size, "bytes")
-      console.log("  - Type:", audioBlob.type)
-
-      if (audioBlob.size === 0) {
-        console.log("❌ Audio blob is empty")
-        setError("No audio data captured. Please try again.")
-        return
-      }
-
-      if (audioBlob.size < 1000) { // Less than 1KB is probably too small
-        console.log("❌ Audio blob too small:", audioBlob.size, "bytes")
-        setError("Recording too short. Please speak for at least 1-2 seconds.")
-        return
-      }
-
-      if (audioBlob.size > 25 * 1024 * 1024) {
-        console.log("❌ File too large:", audioBlob.size, "bytes")
-        setError("Recording too large. Maximum size is 25MB. Try shorter recordings.")
-        return
-      }
-
-      const formData = new FormData()
-      // Use proper filename extension based on MIME type
-      const extension = mimeType.includes('webm') ? 'webm' : 'wav'
-      formData.append("audio", audioBlob, `recording.${extension}`)
-
-      console.log("📡 Sending to server...")
-
-      const response = await fetch("https://speech-to-text-backend-06uq.onrender.com/transcribe-audio", {
-        method: "POST",
-        body: formData,
-      })
-
-      console.log("📡 Server response:")
-      console.log("  - Status:", response.status)
-      console.log("  - OK:", response.ok)
-
-      if (!response.ok) {
-        const errorText = await response.text()
-        throw new Error(`Server error: ${response.status} ${response.statusText} - ${errorText}`)
-      }
-
-      const data = await response.json()
-      console.log("📄 Response data:", data)
-
-      if (data.success) {
-        console.log("✅ Transcription successful:", data.transcript)
-        setTranscript((prev) => prev + data.transcript + " ")
-        fetchSavedTranscripts() // Refresh the history
-        setError("") // Clear any previous errors
-      } else {
-        console.error("❌ Transcription failed:", data.message)
-        setError(`Transcription failed: ${data.message}`)
-      }
-    } catch (error) {
-      console.error("💥 Error sending audio:", error)
-      setError(`Error processing audio: ${error.message}`)
-    } finally {
-      setIsProcessing(false)
-      setAudioChunks([]) // Clear chunks after processing
-    }
-  }
-
   const copyToClipboard = async () => {
     if (transcript) {
       try {
@@ -385,7 +376,6 @@ function App() {
         setTimeout(() => setCopySuccess(false), 2000)
       } catch (err) {
         console.error("Failed to copy text: ", err)
-        // Fallback for older browsers
         const textArea = document.createElement("textarea")
         textArea.value = transcript
         document.body.appendChild(textArea)
@@ -411,7 +401,7 @@ function App() {
   }
 
   const speakText = () => {
-    if (transcript && "speechSynthesis" in window) {
+    if (transcript && typeof window !== 'undefined' && "speechSynthesis" in window) {
       const utterance = new SpeechSynthesisUtterance(transcript)
       speechSynthesis.speak(utterance)
     }
@@ -444,10 +434,8 @@ function App() {
       <div className="main-content">
         <h1 className="main-title">Speech to Text Recognition</h1>
 
-        {/* Error display */}
         {error && <div className="error-banner">⚠️ {error}</div>}
 
-        {/* Method toggle */}
         <div className="method-toggle-card">
           <label className="checkbox-label">
             <input
@@ -455,7 +443,7 @@ function App() {
               checked={useWhisper}
               onChange={(e) => {
                 setUseWhisper(e.target.checked)
-                setError("") // Clear errors when switching
+                setError("")
               }}
               className="checkbox-input"
             />
@@ -504,7 +492,6 @@ function App() {
             </div>
           </div>
 
-          {/* Enhanced status display */}
           <div className="status-display">
             {isProcessing ? (
               <div className="status-processing">
@@ -530,25 +517,6 @@ function App() {
             <h3 className="transcript-title">Transcript:</h3>
             <div className="transcript-box">{transcript || "Your speech will appear here..."}</div>
           </div>
-
-          {/* Debug info (only show in development) */}
-          {process.env.NODE_ENV === "development" && (
-            <div className="debug-info">
-              <strong>Debug Info:</strong>
-              <br />
-              Method: {useWhisper ? "Whisper" : "WebKit"}
-              <br />
-              MediaRecorder: {mediaRecorder ? "Ready" : "Not ready"}
-              <br />
-              Audio chunks: {audioChunks.length}
-              <br />
-              Is listening: {isListening ? "Yes" : "No"}
-              <br />
-              Is processing: {isProcessing ? "Yes" : "No"}
-              <br />
-              {useWhisper && `Recording duration: ${recordingDuration}s`}
-            </div>
-          )}
         </div>
 
         <div className="history-card">
